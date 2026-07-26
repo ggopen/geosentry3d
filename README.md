@@ -2,7 +2,7 @@
 
 基于 **Vue3 + TypeScript + Cesium** 的空间智能前端应用，对实景三维模型（3D Tiles / 倾斜摄影）进行自动测量、自动标注、自动合规分析与报告输出。
 
-**在线演示（GitHub Pages）**：https://ggopen.github.io/geosentry-3d/
+**在线演示（GitHub Pages）**：https://ggopen.github.io/geosentry3d/
 
 > 核心原则：**Never guess geometry. Always call measurement tools.**
 > 系统内所有测量数值均由测量引擎基于真实采样几何计算得出，绝不允许臆造。
