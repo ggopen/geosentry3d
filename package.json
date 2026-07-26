@@ -1,0 +1,27 @@
+{
+  "name": "geosentry-3d",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "GeoSentry 3D - 空间哨兵·合规分析平台 (Vue3 + TypeScript + Cesium)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "cesium": "1.121.0",
+    "pinia": "^2.1.7",
+    "vue": "^3.4.21"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.8",
+    "vite-plugin-cesium": "^1.2.23",
+    "vitest": "^1.5.0",
+    "vue-tsc": "^2.0.16"
+  }
+}
