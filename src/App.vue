@@ -11,6 +11,9 @@ const controller = new AppController()
 const clickAnalyzeOn = ref(false)
 const activeTab = ref<'objects' | 'rules'>('objects')
 const stats = reactive({ showLogs: true })
+// 构建期注入的版本号与发布日期（见 vite.config.ts）
+const appVersion: string = __APP_VERSION__
+const buildDate: string = __BUILD_DATE__
 
 async function onViewerReady(container: HTMLElement): Promise<void> {
   controller.init(container)
@@ -54,6 +57,7 @@ function flyTo(id: string): void {
     <!-- 顶部工具栏 -->
     <div class="toolbar">
       <span class="logo">GeoSentry 3D</span>
+      <span class="version" title="当前版本 / 更新日期">v{{ appVersion }} · {{ buildDate }}</span>
       <button class="btn" :disabled="store.loading" @click="controller.loadTileset()">
         {{ store.tilesetLoaded ? '重新加载瓦片' : '加载 3D Tiles' }}
       </button>
@@ -125,7 +129,12 @@ html, body, #app {
   padding: 8px 10px; background: rgba(11, 16, 23, 0.88);
   border-bottom: 1px solid #263449; backdrop-filter: blur(4px);
 }
-.logo { font-weight: bold; color: #4d9fff; margin-right: 10px; font-size: 15px; }
+.logo { font-weight: bold; color: #4d9fff; margin-right: 6px; font-size: 15px; }
+.version {
+  font-size: 12px; color: #ffd54f; background: rgba(255, 213, 79, 0.12);
+  border: 1px solid rgba(255, 213, 79, 0.45); border-radius: 10px;
+  padding: 2px 10px; margin-right: 10px; white-space: nowrap;
+}
 .sep { width: 1px; height: 20px; background: #263449; margin: 0 4px; }
 
 .btn {

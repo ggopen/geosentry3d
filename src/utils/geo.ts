@@ -145,6 +145,127 @@ export function toLocalXY(
   }
 }
 
+/** 数值分位数（q ∈ [0,1]），线性插值 */
+export function percentile(values: number[], q: number): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const idx = Math.min(sorted.length - 1, Math.max(0, (sorted.length - 1) * q))
+  const lo = Math.floor(idx)
+  const hi = Math.ceil(idx)
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo)
+}
+
+/** Andrew 单调链凸包，返回逆时针顶点（不重复首尾） */
+export function convexHull(points: Array<{ x: number; y: number }>): Array<{ x: number; y: number }> {
+  if (points.length <= 2) return [...points]
+  const pts = [...points].sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x))
+  const cross = (o: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }) =>
+    (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+  const lower: Array<{ x: number; y: number }> = []
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop()
+    lower.push(p)
+  }
+  const upper: Array<{ x: number; y: number }> = []
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i]
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop()
+    upper.push(p)
+  }
+  lower.pop()
+  upper.pop()
+  return lower.concat(upper)
+}
+
+/** 旋转卡壳：求点集的最小面积外接矩形 */
+export function minAreaRect(points: Array<{ x: number; y: number }>): {
+  center: { x: number; y: number }
+  /** 长边（米） */
+  length: number
+  /** 短边（米） */
+  width: number
+  /** 长轴方位角（度，0=北/+y，顺时针） */
+  orientationDeg: number
+  /** 矩形四角（局部坐标，逆时针） */
+  corners: Array<{ x: number; y: number }>
+} {
+  const empty = { center: { x: 0, y: 0 }, length: 0, width: 0, orientationDeg: 0, corners: [] as Array<{ x: number; y: number }> }
+  if (points.length === 0) return empty
+  if (points.length === 1) return { ...empty, center: { ...points[0] } }
+
+  const hull = convexHull(points)
+  let best = { area: Infinity, angle: 0, minU: 0, maxU: 0, minV: 0, maxV: 0 }
+
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i]
+    const b = hull[(i + 1) % hull.length]
+    const angle = Math.atan2(b.y - a.y, b.x - a.x) // 边方向角
+    const cos = Math.cos(angle)
+    const sin = Math.sin(angle)
+    let minU = Infinity
+    let maxU = -Infinity
+    let minV = Infinity
+    let maxV = -Infinity
+    for (const p of hull) {
+      const u = p.x * cos + p.y * sin
+      const v = -p.x * sin + p.y * cos
+      if (u < minU) minU = u
+      if (u > maxU) maxU = u
+      if (v < minV) minV = v
+      if (v > maxV) maxV = v
+    }
+    const area = (maxU - minU) * (maxV - minV)
+    if (area < best.area) best = { area, angle, minU, maxU, minV, maxV }
+  }
+
+  const cos = Math.cos(best.angle)
+  const sin = Math.sin(best.angle)
+  const toXY = (u: number, v: number) => ({ x: u * cos - v * sin, y: u * sin + v * cos })
+  const corners = [
+    toXY(best.minU, best.minV),
+    toXY(best.maxU, best.minV),
+    toXY(best.maxU, best.maxV),
+    toXY(best.minU, best.maxV)
+  ]
+  const cx = (best.minU + best.maxU) / 2
+  const cy = (best.minV + best.maxV) / 2
+  const center = toXY(cx, cy)
+
+  const sideU = best.maxU - best.minU
+  const sideV = best.maxV - best.minV
+  // 长轴方向角：若 sideU 为长边则方向为 best.angle，否则垂直
+  const majorAngle = sideU >= sideV ? best.angle : best.angle + Math.PI / 2
+  let az = 90 - toDegrees(majorAngle)
+  az = ((az % 180) + 180) % 180
+  return {
+    center,
+    length: Math.max(sideU, sideV),
+    width: Math.min(sideU, sideV),
+    orientationDeg: Math.round(az * 10) / 10,
+    corners
+  }
+}
+
+/** 局部平面多边形周长（米） */
+export function localPerimeter(points: Array<{ x: number; y: number }>): number {
+  let p = 0
+  for (let i = 0; i < points.length; i++) {
+    const j = (i + 1) % points.length
+    p += Math.hypot(points[j].x - points[i].x, points[j].y - points[i].y)
+  }
+  return p
+}
+
+/** 局部平面多边形面积（米²，Shoelace） */
+export function localPolygonArea(points: Array<{ x: number; y: number }>): number {
+  let s = 0
+  for (let i = 0; i < points.length; i++) {
+    const j = (i + 1) % points.length
+    s += points[i].x * points[j].y - points[j].x * points[i].y
+  }
+  return Math.abs(s / 2)
+}
+
 /** 网格聚类：对布尔网格做 8-连通域分析，返回每簇的格子索引列表 */
 export function clusterGrid(mask: boolean[], cols: number, rows: number): number[][] {
   const visited = new Array(mask.length).fill(false)

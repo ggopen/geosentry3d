@@ -3,17 +3,20 @@
  *
  * 核心原则：Never guess geometry. Always call measurement tools.
  * 本服务是"测量工具"的几何数据源：
- *  - analyzeAt() 通过 scene.sampleHeightMostDetailed 对点击位置周边做网格采样，
- *    用采样点云计算局部 OBB（PCA 定向），绝不臆造尺寸。
- *  - autoScan() 对整个瓦片集包围区做网格采样 + 连通域聚类，自动发现凸出对象。
+ *  - analyzeAt()：点击位置周边网格采样（sampleHeightMostDetailed），
+ *    自适应扩大采样半径直到对象完整落入视野；点云交给 Segmenter
+ *    （DBSCAN 分割 + 凹包边界）得到精确对象轮廓。
+ *  - autoScan()：全场景网格采样 + DBSCAN 分割，自动发现凸出对象。
  */
 import * as Cesium from 'cesium'
 import type { BoundingInfo } from '../core/types'
-import { clusterGrid, pca2d, toLocalXY } from '../utils/geo'
+import { percentile, toLocalXY } from '../utils/geo'
+import { Segmenter, type SamplePoint, type Segment } from '../segmentation/Segmenter'
 
 export class SceneService {
   private viewer: Cesium.Viewer | null = null
   private tileset: Cesium.Cesium3DTileset | null = null
+  private segmenter = new Segmenter()
 
   get isReady(): boolean {
     return this.viewer !== null && this.tileset !== null
@@ -65,8 +68,7 @@ export class SceneService {
     if (!ray) return null
     const cartesian = viewer.scene.pickPosition(position)
     if (!cartesian) {
-      const globe = viewer.scene.globe
-      const c = globe.pick(ray, viewer.scene)
+      const c = viewer.scene.globe.pick(ray, viewer.scene)
       if (!c) return null
       return Cesium.Cartographic.fromCartesian(c)
     }
@@ -92,94 +94,145 @@ export class SceneService {
     return results
   }
 
-  /**
-   * 点击分析：以点击点为中心做局部网格采样，计算 OBB。
-   * @param radius 采样半径（米）
-   */
-  async analyzeAt(
-    position: Cesium.Cartesian2,
-    radius = 2.0,
-    step = 0.4
-  ): Promise<BoundingInfo | null> {
-    const center = this.pickCartographic(position)
-    if (!center) return null
-
-    const centerLon = Cesium.Math.toDegrees(center.longitude)
-    const centerLat = Cesium.Math.toDegrees(center.latitude)
-    const ref = { lon: centerLon, lat: centerLat }
+  /** 以 (lon,lat) 为中心做正方形网格高度采样，返回采样点（局部坐标 + 经纬度 + 高度） */
+  private async sampleGrid(
+    centerLon: number,
+    centerLat: number,
+    radius: number,
+    step: number,
+    onProgress?: (done: number, total: number) => void
+  ): Promise<SamplePoint[]> {
     const latDegPerM = 1 / 111320
-    const lonDegPerM = 1 / (111320 * Math.cos(center.latitude))
-
-    // 构建采样网格
+    const lonDegPerM = 1 / (111320 * Math.cos((centerLat * Math.PI) / 180))
+    const ref = { lon: centerLon, lat: centerLat }
+    const n = Math.max(2, Math.round((radius * 2) / step))
     const cartos: Cesium.Cartographic[] = []
     const gridXY: Array<{ x: number; y: number }> = []
-    const n = Math.max(2, Math.round((radius * 2) / step))
     for (let iy = 0; iy <= n; iy++) {
       for (let ix = 0; ix <= n; ix++) {
         const x = -radius + ix * step
         const y = -radius + iy * step
         gridXY.push({ x, y })
-        cartos.push(
-          Cesium.Cartographic.fromDegrees(centerLon + x * lonDegPerM, centerLat + y * latDegPerM)
-        )
+        cartos.push(Cesium.Cartographic.fromDegrees(centerLon + x * lonDegPerM, centerLat + y * latDegPerM))
       }
     }
-
-    const sampled = await this.sampleHeights(cartos, 120)
-    const heights = sampled.filter((s): s is Cesium.Cartographic => !!s).map((s) => s.height)
-    if (heights.length < 4) return null
-
-    const ground = Math.min(...heights)
-    const threshold = ground + 0.3
-    const elevated: Array<{ x: number; y: number; h: number; lon: number; lat: number }> = []
+    const sampled = await this.sampleHeights(cartos, 120, onProgress)
+    const pts: SamplePoint[] = []
     sampled.forEach((s, i) => {
-      if (s && s.height > threshold) {
-        elevated.push({
-          x: gridXY[i].x,
-          y: gridXY[i].y,
-          h: s.height,
-          lon: Cesium.Math.toDegrees(s.longitude),
-          lat: Cesium.Math.toDegrees(s.latitude)
-        })
-      }
+      if (!s) return
+      pts.push({
+        x: gridXY[i].x,
+        y: gridXY[i].y,
+        h: s.height,
+        lon: Cesium.Math.toDegrees(s.longitude),
+        lat: Cesium.Math.toDegrees(s.latitude)
+      })
     })
+    return pts
+  }
 
-    // 无凸出物 → 地面面片
-    if (elevated.length < 3) {
-      return {
-        center: { lon: centerLon, lat: centerLat, height: ground },
-        width: radius * 2,
-        length: radius * 2,
-        height: 0.1,
-        orientationDeg: 0,
-        groundHeight: ground
-      }
-    }
-
-    // PCA 求 OBB 方向与展布
-    const pca = pca2d(elevated.map((p) => ({ x: p.x, y: p.y })))
-    const maxH = Math.max(...elevated.map((p) => p.h))
-    const objHeight = maxH - ground
-    // 对象中心取凸出点均值
-    const mLon = elevated.reduce((s, p) => s + p.lon, 0) / elevated.length
-    const mLat = elevated.reduce((s, p) => s + p.lat, 0) / elevated.length
-
+  /** 把分割结果转换为 BoundingInfo */
+  private toBoundingInfo(seg: Segment, ground: number): BoundingInfo {
+    const cx = seg.footprint.reduce((s, p) => s + p.lon, 0) / seg.footprint.length
+    const cy = seg.footprint.reduce((s, p) => s + p.lat, 0) / seg.footprint.length
     return {
-      center: { lon: mLon, lat: mLat, height: ground + objHeight },
-      width: Math.max(0.1, Math.min(pca.lengthAlongMajor, pca.lengthAlongMinor) + step),
-      length: Math.max(0.1, Math.max(pca.lengthAlongMajor, pca.lengthAlongMinor) + step),
-      height: objHeight,
-      orientationDeg: pca.orientationDeg,
-      groundHeight: ground
+      center: { lon: cx, lat: cy, height: ground + seg.height },
+      width: Math.max(0.1, seg.rect.width),
+      length: Math.max(0.1, seg.rect.length),
+      height: seg.height,
+      orientationDeg: seg.rect.orientationDeg,
+      groundHeight: ground,
+      footprint: seg.footprint,
+      footprintArea: seg.area,
+      perimeter: seg.perimeter,
+      shapeFeatures: seg.features
     }
   }
 
   /**
-   * 自动扫描：对瓦片集包围区网格采样 + 聚类，自动发现对象。
+   * 点击分析：局部网格采样 + DBSCAN 分割 + 凹包边界。
+   * 若对象触到采样边界则自动扩大半径（2m → 4m → 8m），保证大对象完整。
+   */
+  async analyzeAt(
+    position: Cesium.Cartesian2,
+    initialRadius = 2.0,
+    step = 0.25
+  ): Promise<BoundingInfo | null> {
+    const center = this.pickCartographic(position)
+    if (!center) return null
+    const centerLon = Cesium.Math.toDegrees(center.longitude)
+    const centerLat = Cesium.Math.toDegrees(center.latitude)
+
+    let radius = initialRadius
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const pts = await this.sampleGrid(centerLon, centerLat, radius, step)
+      if (pts.length < 8) return null
+
+      const ground = percentile(pts.map((p) => p.h), 0.05)
+      const elevated = pts.filter((p) => p.h > ground + 0.3)
+
+      // 无凸出物 → 地面面片
+      if (elevated.length < 4) {
+        return {
+          center: { lon: centerLon, lat: centerLat, height: ground },
+          width: radius * 2,
+          length: radius * 2,
+          height: 0.1,
+          orientationDeg: 0,
+          groundHeight: ground
+        }
+      }
+
+      const segments = this.segmenter.segment(elevated, {
+        eps: step * 2,
+        minPts: 3,
+        ground,
+        minArea: 0.2
+      })
+      if (segments.length === 0) return null
+
+      // 选包含点击点（局部原点）的簇；否则取面积最大者
+      let target =
+        segments.find((seg) => seg.points.some((p) => Math.hypot(p.x, p.y) <= step * 1.5)) ??
+        segments[0]
+
+      // 对象触到采样边界且还能扩大 → 重新采样
+      const touchesBorder = target.points.some(
+        (p) => Math.abs(p.x) > radius - step * 1.5 || Math.abs(p.y) > radius - step * 1.5
+      )
+      if (touchesBorder && radius < 8) {
+        radius *= 2
+        step *= 1.5
+        continue
+      }
+
+      // 局部地面基准：取紧邻对象边界的非凸出采样点中位数
+      // （全局分位数在地形有坡度时会低估对象基座，导致高度虚高）
+      const nearGround: number[] = []
+      for (const p of pts) {
+        if (p.h > ground + 0.3) continue
+        for (const q of target.points) {
+          if (Math.abs(p.x - q.x) <= 1.2 && Math.abs(p.y - q.y) <= 1.2) {
+            nearGround.push(p.h)
+            break
+          }
+        }
+      }
+      const groundLocal = nearGround.length >= 3 ? percentile(nearGround, 0.5) : ground
+      const info = this.toBoundingInfo(target, groundLocal)
+      info.height = Math.max(0.1, ground + target.height - groundLocal)
+      info.center.height = groundLocal + info.height
+      return info
+    }
+    return null
+  }
+
+  /**
+   * 自动扫描：全场景网格采样 + DBSCAN 分割，自动发现对象。
    */
   async autoScan(
-    gridSize = 22,
-    maxObjects = 10,
+    gridSize = 28,
+    maxObjects = 12,
     onProgress?: (done: number, total: number) => void
   ): Promise<BoundingInfo[]> {
     if (!this.tileset) throw new Error('瓦片集未加载')
@@ -187,66 +240,43 @@ export class SceneService {
     const centerCarto = Cesium.Cartographic.fromCartesian(sphere.center)
     const centerLon = Cesium.Math.toDegrees(centerCarto.longitude)
     const centerLat = Cesium.Math.toDegrees(centerCarto.latitude)
-    const half = sphere.radius * 0.75
+    const half = sphere.radius * 0.72
     const latDegPerM = 1 / 111320
     const lonDegPerM = 1 / (111320 * Math.cos(centerCarto.latitude))
+    const step = (2 * half) / (gridSize - 1)
+    const ref = { lon: centerLon, lat: centerLat }
 
     const cartos: Cesium.Cartographic[] = []
     for (let iy = 0; iy < gridSize; iy++) {
       for (let ix = 0; ix < gridSize; ix++) {
-        const x = -half + (2 * half * ix) / (gridSize - 1)
-        const y = -half + (2 * half * iy) / (gridSize - 1)
-        cartos.push(
-          Cesium.Cartographic.fromDegrees(centerLon + x * lonDegPerM, centerLat + y * latDegPerM)
-        )
+        const x = -half + step * ix
+        const y = -half + step * iy
+        cartos.push(Cesium.Cartographic.fromDegrees(centerLon + x * lonDegPerM, centerLat + y * latDegPerM))
       }
     }
 
     const sampled = await this.sampleHeights(cartos, 100, onProgress)
-    const heights = sampled.filter((s): s is Cesium.Cartographic => !!s).map((s) => s.height)
-    if (heights.length < 10) return []
-
-    // 地面基准：取 10% 分位数，避免被噪声拉低
-    const sorted = [...heights].sort((a, b) => a - b)
-    const ground = sorted[Math.floor(sorted.length * 0.1)]
-    const threshold = ground + 1.0
-
-    const mask = sampled.map((s) => !!s && s.height > threshold)
-    const clusters = clusterGrid(mask, gridSize, gridSize)
-
-    const ref = { lon: centerLon, lat: centerLat }
-    const results: BoundingInfo[] = []
-    const sortedClusters = clusters
-      .filter((c) => c.length >= 2)
-      .sort((a, b) => b.length - a.length)
-      .slice(0, maxObjects)
-
-    for (const cluster of sortedClusters) {
-      const pts: Array<{ lon: number; lat: number; h: number; x: number; y: number }> = []
-      for (const idx of cluster) {
-        const s = sampled[idx]
-        if (!s) continue
-        const lon = Cesium.Math.toDegrees(s.longitude)
-        const lat = Cesium.Math.toDegrees(s.latitude)
-        const xy = toLocalXY({ lon, lat }, ref)
-        pts.push({ lon, lat, h: s.height, x: xy.x, y: xy.y })
-      }
-      if (pts.length < 2) continue
-      const pca = pca2d(pts.map((p) => ({ x: p.x, y: p.y })))
-      const cell = (2 * half) / (gridSize - 1)
-      const maxH = Math.max(...pts.map((p) => p.h))
-      const mLon = pts.reduce((s, p) => s + p.lon, 0) / pts.length
-      const mLat = pts.reduce((s, p) => s + p.lat, 0) / pts.length
-      results.push({
-        center: { lon: mLon, lat: mLat, height: maxH },
-        width: Math.max(0.2, Math.min(pca.lengthAlongMajor, pca.lengthAlongMinor) + cell),
-        length: Math.max(0.2, Math.max(pca.lengthAlongMajor, pca.lengthAlongMinor) + cell),
-        height: maxH - ground,
-        orientationDeg: pca.orientationDeg,
-        groundHeight: ground
-      })
+    const pts: SamplePoint[] = []
+    for (const s of sampled) {
+      if (!s) continue
+      const lon = Cesium.Math.toDegrees(s.longitude)
+      const lat = Cesium.Math.toDegrees(s.latitude)
+      const xy = toLocalXY({ lon, lat }, ref)
+      pts.push({ x: xy.x, y: xy.y, h: s.height, lon, lat })
     }
-    return results
+    if (pts.length < 20) return []
+
+    // 地面基准：10% 分位，抗噪
+    const ground = percentile(pts.map((p) => p.h), 0.1)
+    const elevated = pts.filter((p) => p.h > ground + 1.2)
+
+    const segments = this.segmenter.segment(elevated, {
+      eps: step * 1.6,
+      minPts: 2,
+      ground,
+      minArea: 8
+    })
+    return segments.slice(0, maxObjects).map((seg) => this.toBoundingInfo(seg, ground))
   }
 
   /** 飞到指定包围盒 */

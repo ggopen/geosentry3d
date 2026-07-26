@@ -19,30 +19,34 @@
 | 模块 | 说明 |
 | --- | --- |
 | Cesium Viewer | 加载互联网 3D Tiles 实景三维数据（默认示例：mars3d 寺庙倾斜摄影） |
-| Measurement Engine | 距离 / 高度 / 面积 / 体积 / 角度 / 净空，按对象类型自动选择测量方法 |
-| Object Recognition Agent | 基于 OBB 几何启发式识别 door / window / building / fence / pole / road / tree |
+| Object Segmentation（v1.1） | **DBSCAN 密度聚类**（density-clustering）点云分割 + **concaveman 凹包**提取真实边界 + 旋转卡壳最小面积矩形，取代旧版立方体近似 |
+| Measurement Engine | 距离 / 高度 / 面积 / 体积 / 角度 / 净空，按对象类型自动选择；面积/体积基于真实边界多边形；高度采用局部地面基准校正 |
+| Object Recognition Agent | 几何启发式 + 形状特征（足印面积 / 长宽比 / 圆形度 / 密实度）识别 door / window / building / fence / pole / road / tree |
 | Spatial Rule Engine | DSL 规则解析与求值：`door.width >= 0.9`、`count(window) > 4`、`IF building.height > 30 THEN fireLevel = Level1`，支持 AND/OR |
-| Spatial Annotation | 定向包围盒 + 标签，Red=违规 / Yellow=警告 / Green=合规 |
+| Spatial Annotation | **真实边界拉伸体**（凹包多边形）+ 顶部轮廓线 + 标签，Red=违规 / Yellow=警告 / Green=合规 |
 | Report Engine | 一键导出 HTML / JSON / CSV 合规分析报告 |
 | 交互测量 | 手动测距 / 测面 / 测高 |
-| 自动扫描 | 全场景网格采样 + 连通域聚类，自动发现凸出对象并批量分析 |
-| 点击分析 | 点击模型表面 → 局部采样 → 识别 → 测量 → 合规 → 标注 全流程 |
+| 自动扫描 | 全场景网格采样 + DBSCAN 分割，自动发现凸出对象并批量分析 |
+| 点击分析 | 点击模型表面 → 自适应加密采样 → 分割 → 识别 → 测量 → 合规 → 标注 全流程 |
 
 ## 技术架构
 
 ```text
 /src
   /core         领域类型（SpatialObject / Measurement / ComplianceResult ...）
+  /segmentation Segmenter（DBSCAN 分割 + 凹包边界 + 形状特征，v1.1 新增）
   /measurement  MeasurementEngine（纯计算，与 Cesium 解耦）+ 交互测量工具
   /rules        Spatial Rule Engine（DSL 分词 / 递归下降解析 / 求值）
-  /annotation   AnnotationLayer（Cesium 实体渲染）
+  /annotation   AnnotationLayer（Cesium 实体渲染：边界拉伸体 / 轮廓线 / 标签）
   /agents       多 Agent：Recognition / Measurement / Compliance / Annotation / Orchestrator
   /components   Vue 组件（Viewer / ObjectList / RuleEditor）
   /services     SceneService（采样工具）/ ReportEngine / AppController
   /store        Pinia 状态管理
-  /utils        纯几何计算（Haversine / 测地面积 / PCA-OBB / 网格聚类）
-/tests          vitest 单元测试（37 例）
+  /utils        纯几何计算（Haversine / 测地面积 / 凸包 / 旋转卡壳 / 分位数）
+/tests          vitest 单元测试（47 例）
 ```
+
+**关键第三方库**：[density-clustering](https://www.npmjs.com/package/density-clustering)（DBSCAN/OPTICS 聚类）、[concaveman](https://github.com/mapbox/concaveman)（Mapbox 快速凹包算法）。
 
 - 模块间通过接口与 Pinia 解耦，符合 Clean Architecture；
 - 所有引擎核心（测量 / 规则 / 识别）不依赖 Cesium，可独立测试与替换；
@@ -73,3 +77,10 @@ pnpm build
 - `tests/rules.test.ts` —— DSL 解析求值、文档示例（宽 0.83m 的门 → FAIL）、IF-THEN 推导
 - `tests/measurement.test.ts` —— 自动测量选择与计算
 - `tests/recognition.test.ts` —— 对象识别启发式 + 多 Agent 流水线输出 schema
+
+## 更新日志
+
+| 版本 | 日期 | 内容 |
+| --- | --- | --- |
+| v1.1.0 | 2026-07-26 | **识别精度重构**：集成 density-clustering（DBSCAN）+ concaveman（凹包），对象边界由立方体升级为真实凹多边形；测量采用真实边界面积与局部地面基准；识别引入形状特征；页面增加版本号+日期展示 |
+| v1.0.0 | 2026-07-26 | 首个版本：3D Tiles 加载、测量/规则/标注/报告引擎、自动扫描、点击分析、手动测量 |

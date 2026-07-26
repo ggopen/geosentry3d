@@ -1,7 +1,7 @@
 {
   "name": "geosentry-3d",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "description": "GeoSentry 3D - 空间哨兵·合规分析平台 (Vue3 + TypeScript + Cesium)",
   "scripts": {
@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "cesium": "1.121.0",
+    "concaveman": "^2.0.0",
+    "density-clustering": "^1.3.0",
     "pinia": "^2.1.7",
     "vue": "^3.4.21"
   },

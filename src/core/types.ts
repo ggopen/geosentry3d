@@ -22,13 +22,13 @@ export type ObjectType =
   | 'ground'
   | 'unknown'
 
-/** 对象包围盒信息（OBB 的简化表达） */
+/** 对象包围盒信息（v1.1：增加真实边界与形状特征） */
 export interface BoundingInfo {
   /** 中心点（地理坐标） */
   center: { lon: number; lat: number; height: number }
-  /** 短边尺寸（米） */
+  /** 短边尺寸（米，最小面积外接矩形） */
   width: number
-  /** 长边尺寸（米） */
+  /** 长边尺寸（米，最小面积外接矩形） */
   length: number
   /** 高度（相对地面基准，米） */
   height: number
@@ -36,6 +36,18 @@ export interface BoundingInfo {
   orientationDeg: number
   /** 地面基准高（米） */
   groundHeight: number
+  /** 真实边界（凹包多边形，经纬度，不闭合）。v1.1 起取代纯立方体近似 */
+  footprint?: Array<{ lon: number; lat: number }>
+  /** 边界多边形测地面积（米²） */
+  footprintArea?: number
+  /** 边界周长（米） */
+  perimeter?: number
+  /** 形状特征（长宽比 / 圆形度 / 密实度） */
+  shapeFeatures?: {
+    aspectRatio: number
+    circularity: number
+    solidity: number
+  }
 }
 
 /** 空间对象 */
